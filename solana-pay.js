@@ -1,49 +1,187 @@
 // Purple Squirrel Media - Solana Pay Integration
-// Zero-fee payments using Solana blockchain
+// Solana payments with 1% platform fee
 
 const PSM_PAY = {
-    // Your Solana wallet address for receiving payments
+    // Configuration - UPDATE THESE VALUES
     MERCHANT_WALLET: 'YOUR_SOLANA_WALLET_ADDRESS', // Replace with your wallet
-
-    // Platform fee wallet (1% of each transaction)
     FEE_WALLET: 'DjaRzzZi94Mq9zJvi23QbB5yRbCSRFENTDDeWicPVxcu',
     FEE_PERCENT: 0.01, // 1% platform fee
 
-    // Subscription tiers in SOL (prices will fluctuate with SOL price)
+    // API Configuration - UPDATE FOR PRODUCTION
+    CONFIG: {
+        API_URL: 'https://your-api.example.com',
+        MINTER_URL: 'https://your-minter.example.com',
+        // RPC endpoints with fallbacks
+        RPC_ENDPOINTS: [
+            'https://api.mainnet-beta.solana.com',
+            'https://solana-mainnet.g.alchemy.com/v2/your-key',
+            'https://rpc.helius.xyz/?api-key=your-key'
+        ]
+    },
+
+    // Subscription tiers
     TIERS: {
         basic: {
             name: 'Basic',
-            priceSOL: 0.05,  // ~$10 at $200/SOL
+            priceSOL: 0.05,
             priceUSDC: 9.99,
             features: ['HD Streaming', 'Basic Library', 'Mobile Access']
         },
         pro: {
             name: 'Pro',
-            priceSOL: 0.1,   // ~$20 at $200/SOL
+            priceSOL: 0.1,
             priceUSDC: 19.99,
             features: ['4K Streaming', 'Full Library', 'Download', 'No Ads']
         },
         creator: {
             name: 'Creator',
-            priceSOL: 0.25,  // ~$50 at $200/SOL
+            priceSOL: 0.25,
             priceUSDC: 49.99,
             features: ['Unlimited Upload', 'Monetization', 'Analytics', 'Priority Support']
         }
     },
 
-    // USDC on Solana (for stable pricing)
+    // USDC on Solana mainnet
     USDC_MINT: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
 
-    // Initialize
+    // State
+    connection: null,
+    provider: null,
+    currentRpcIndex: 0,
+
+    // Initialize with multi-wallet support
     async init() {
         this.connection = null;
         this.provider = null;
 
-        if (window.solana && window.solana.isPhantom) {
+        // Check for wallets in order of preference
+        if (window.solana?.isPhantom) {
             this.provider = window.solana;
+        } else if (window.solflare?.isSolflare) {
+            this.provider = window.solflare;
+        } else if (window.backpack) {
+            this.provider = window.backpack;
         }
 
+        // Initialize connection
+        await this.initConnection();
+
         return this;
+    },
+
+    // Initialize connection with fallback
+    async initConnection() {
+        const { Connection } = window.solanaWeb3;
+
+        for (let i = 0; i < this.CONFIG.RPC_ENDPOINTS.length; i++) {
+            try {
+                const endpoint = this.CONFIG.RPC_ENDPOINTS[i];
+                const conn = new Connection(endpoint, 'confirmed');
+                await conn.getLatestBlockhash(); // Test connection
+                this.connection = conn;
+                this.currentRpcIndex = i;
+                console.log('Connected to RPC:', endpoint);
+                return;
+            } catch (error) {
+                console.warn(`RPC ${i} failed, trying next...`);
+            }
+        }
+        throw new Error('All RPC endpoints failed');
+    },
+
+    // Switch to next RPC on failure
+    async switchRpc() {
+        this.currentRpcIndex = (this.currentRpcIndex + 1) % this.CONFIG.RPC_ENDPOINTS.length;
+        await this.initConnection();
+    },
+
+    // Get available wallets
+    getAvailableWallets() {
+        const wallets = [];
+        if (window.solana?.isPhantom) wallets.push({ name: 'Phantom', provider: window.solana });
+        if (window.solflare?.isSolflare) wallets.push({ name: 'Solflare', provider: window.solflare });
+        if (window.backpack) wallets.push({ name: 'Backpack', provider: window.backpack });
+        return wallets;
+    },
+
+    // Connect specific wallet
+    async connectWallet(walletName = null) {
+        const wallets = this.getAvailableWallets();
+
+        if (wallets.length === 0) {
+            return { success: false, error: 'No Solana wallet found. Please install Phantom, Solflare, or Backpack.' };
+        }
+
+        const wallet = walletName
+            ? wallets.find(w => w.name.toLowerCase() === walletName.toLowerCase())
+            : wallets[0];
+
+        if (!wallet) {
+            return { success: false, error: `Wallet ${walletName} not found` };
+        }
+
+        try {
+            await wallet.provider.connect();
+            this.provider = wallet.provider;
+            return {
+                success: true,
+                wallet: wallet.name,
+                publicKey: wallet.provider.publicKey.toString()
+            };
+        } catch (error) {
+            return { success: false, error: error.message };
+        }
+    },
+
+    // Check user balance before transaction
+    async checkBalance(payInUSDC = false, tier) {
+        if (!this.provider?.publicKey) {
+            return { sufficient: false, error: 'Wallet not connected' };
+        }
+
+        const tierData = this.TIERS[tier];
+        if (!tierData) {
+            return { sufficient: false, error: 'Invalid tier' };
+        }
+
+        const { PublicKey } = window.solanaWeb3;
+        const publicKey = this.provider.publicKey;
+
+        try {
+            if (payInUSDC) {
+                const { getAssociatedTokenAddress } = window.splToken;
+                const usdcMint = new PublicKey(this.USDC_MINT);
+                const tokenAccount = await getAssociatedTokenAddress(usdcMint, publicKey);
+
+                try {
+                    const balance = await this.connection.getTokenAccountBalance(tokenAccount);
+                    const required = tierData.priceUSDC;
+                    const available = parseFloat(balance.value.uiAmount);
+
+                    return {
+                        sufficient: available >= required,
+                        available,
+                        required,
+                        currency: 'USDC'
+                    };
+                } catch {
+                    return { sufficient: false, available: 0, required: tierData.priceUSDC, currency: 'USDC' };
+                }
+            } else {
+                const balance = await this.connection.getBalance(publicKey);
+                const available = balance / 1_000_000_000;
+                const required = tierData.priceSOL + 0.01; // Add buffer for tx fees
+
+                return {
+                    sufficient: available >= required,
+                    available,
+                    required,
+                    currency: 'SOL'
+                };
+            }
+        } catch (error) {
+            return { sufficient: false, error: error.message };
+        }
     },
 
     // Create payment request URL (for QR codes)
@@ -54,7 +192,6 @@ const PSM_PAY = {
         const amount = payInUSDC ? tierData.priceUSDC : tierData.priceSOL;
         const token = payInUSDC ? this.USDC_MINT : null;
 
-        // Solana Pay URL format
         let url = `solana:${this.MERCHANT_WALLET}?amount=${amount}`;
         if (token) {
             url += `&spl-token=${token}`;
@@ -66,54 +203,64 @@ const PSM_PAY = {
         return url;
     },
 
-    // Process payment directly from browser
+    // Process payment with validation
     async payWithWallet(tier, payInUSDC = false) {
+        // Validate tier
+        const tierData = this.TIERS[tier];
+        if (!tierData) {
+            return { success: false, error: `Invalid tier: ${tier}` };
+        }
+
         if (!this.provider) {
-            return { success: false, error: 'Please install Phantom wallet' };
+            return { success: false, error: 'No wallet connected. Please connect a wallet first.' };
+        }
+
+        // Check balance first
+        const balanceCheck = await this.checkBalance(payInUSDC, tier);
+        if (!balanceCheck.sufficient) {
+            return {
+                success: false,
+                error: `Insufficient ${balanceCheck.currency} balance. You have ${balanceCheck.available?.toFixed(4)} but need ${balanceCheck.required}`
+            };
         }
 
         try {
-            // Connect wallet if not connected
             await this.provider.connect();
             const publicKey = this.provider.publicKey;
-
-            const tierData = this.TIERS[tier];
             const amount = payInUSDC ? tierData.priceUSDC : tierData.priceSOL;
-
-            // Create transaction reference for tracking
             const reference = this.generateReference();
 
             if (payInUSDC) {
-                // SPL Token transfer (USDC)
                 return await this.transferSPLToken(publicKey, amount, reference, tier);
             } else {
-                // Native SOL transfer
                 return await this.transferSOL(publicKey, amount, reference, tier);
             }
         } catch (error) {
             if (error.code === 4001) {
                 return { success: false, error: 'Transaction cancelled by user' };
             }
+            // Try switching RPC on network errors
+            if (error.message?.includes('fetch') || error.message?.includes('network')) {
+                await this.switchRpc();
+                return { success: false, error: 'Network error. Please try again.' };
+            }
             return { success: false, error: error.message };
         }
     },
 
-    // Transfer SOL (with 1% platform fee)
+    // Transfer SOL with 1% platform fee
     async transferSOL(fromPubkey, amount, reference, tier) {
-        // Using @solana/web3.js loaded from CDN
-        const { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } = window.solanaWeb3;
+        const { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } = window.solanaWeb3;
 
-        const connection = new Connection('https://api.mainnet-beta.solana.com');
         const merchantPubkey = new PublicKey(this.MERCHANT_WALLET);
         const feePubkey = new PublicKey(this.FEE_WALLET);
 
-        // Calculate fee and merchant amounts
+        // Calculate amounts
         const totalLamports = Math.round(amount * LAMPORTS_PER_SOL);
         const feeLamports = Math.round(totalLamports * this.FEE_PERCENT);
         const merchantLamports = totalLamports - feeLamports;
 
         const transaction = new Transaction()
-            // Main payment to merchant (99%)
             .add(
                 SystemProgram.transfer({
                     fromPubkey: fromPubkey,
@@ -121,7 +268,6 @@ const PSM_PAY = {
                     lamports: merchantLamports
                 })
             )
-            // Platform fee (1%)
             .add(
                 SystemProgram.transfer({
                     fromPubkey: fromPubkey,
@@ -130,19 +276,24 @@ const PSM_PAY = {
                 })
             );
 
-        // Get recent blockhash
-        const { blockhash } = await connection.getLatestBlockhash();
+        // Get blockhash with retry
+        const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash('confirmed');
         transaction.recentBlockhash = blockhash;
         transaction.feePayer = fromPubkey;
 
-        // Sign and send
         const signed = await this.provider.signTransaction(transaction);
-        const signature = await connection.sendRawTransaction(signed.serialize());
+        const signature = await this.connection.sendRawTransaction(signed.serialize(), {
+            skipPreflight: false,
+            preflightCommitment: 'confirmed'
+        });
 
-        // Confirm transaction
-        await connection.confirmTransaction(signature);
+        // Use proper confirmation with timeout
+        await this.connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight
+        }, 'confirmed');
 
-        // Notify backend
         await this.recordPayment(signature, tier, amount, 'SOL');
 
         return {
@@ -150,16 +301,23 @@ const PSM_PAY = {
             signature,
             tier,
             amount,
-            currency: 'SOL'
+            currency: 'SOL',
+            fee: feeLamports / LAMPORTS_PER_SOL,
+            explorer: `https://solscan.io/tx/${signature}`
         };
     },
 
-    // Transfer USDC (SPL Token) with 1% platform fee
+    // Transfer USDC with 1% platform fee
     async transferSPLToken(fromPubkey, amount, reference, tier) {
-        const { Connection, PublicKey, Transaction } = window.solanaWeb3;
-        const { createTransferInstruction, getAssociatedTokenAddress, getOrCreateAssociatedTokenAccount, TOKEN_PROGRAM_ID } = window.splToken;
+        const { PublicKey, Transaction } = window.solanaWeb3;
+        const {
+            createTransferInstruction,
+            getAssociatedTokenAddress,
+            createAssociatedTokenAccountInstruction,
+            TOKEN_PROGRAM_ID,
+            ASSOCIATED_TOKEN_PROGRAM_ID
+        } = window.splToken;
 
-        const connection = new Connection('https://api.mainnet-beta.solana.com');
         const merchantPubkey = new PublicKey(this.MERCHANT_WALLET);
         const feePubkey = new PublicKey(this.FEE_WALLET);
         const usdcMint = new PublicKey(this.USDC_MINT);
@@ -169,42 +327,82 @@ const PSM_PAY = {
         const merchantTokenAccount = await getAssociatedTokenAddress(usdcMint, merchantPubkey);
         const feeTokenAccount = await getAssociatedTokenAddress(usdcMint, feePubkey);
 
-        // USDC has 6 decimals - calculate fee and merchant amounts
+        // Calculate amounts (USDC has 6 decimals)
         const totalAmount = Math.round(amount * 1_000_000);
         const feeAmount = Math.round(totalAmount * this.FEE_PERCENT);
         const merchantAmount = totalAmount - feeAmount;
 
-        const transaction = new Transaction()
-            // Main payment to merchant (99%)
-            .add(
-                createTransferInstruction(
-                    fromTokenAccount,
-                    merchantTokenAccount,
+        const transaction = new Transaction();
+
+        // Check if fee token account exists, create if not
+        try {
+            await this.connection.getAccountInfo(feeTokenAccount);
+        } catch {
+            transaction.add(
+                createAssociatedTokenAccountInstruction(
                     fromPubkey,
-                    merchantAmount,
-                    [],
-                    TOKEN_PROGRAM_ID
-                )
-            )
-            // Platform fee (1%)
-            .add(
-                createTransferInstruction(
-                    fromTokenAccount,
                     feeTokenAccount,
-                    fromPubkey,
-                    feeAmount,
-                    [],
-                    TOKEN_PROGRAM_ID
+                    feePubkey,
+                    usdcMint,
+                    TOKEN_PROGRAM_ID,
+                    ASSOCIATED_TOKEN_PROGRAM_ID
                 )
             );
+        }
 
-        const { blockhash } = await connection.getLatestBlockhash();
+        // Check if merchant token account exists, create if not
+        try {
+            await this.connection.getAccountInfo(merchantTokenAccount);
+        } catch {
+            transaction.add(
+                createAssociatedTokenAccountInstruction(
+                    fromPubkey,
+                    merchantTokenAccount,
+                    merchantPubkey,
+                    usdcMint,
+                    TOKEN_PROGRAM_ID,
+                    ASSOCIATED_TOKEN_PROGRAM_ID
+                )
+            );
+        }
+
+        // Add transfer instructions
+        transaction.add(
+            createTransferInstruction(
+                fromTokenAccount,
+                merchantTokenAccount,
+                fromPubkey,
+                merchantAmount,
+                [],
+                TOKEN_PROGRAM_ID
+            )
+        );
+        transaction.add(
+            createTransferInstruction(
+                fromTokenAccount,
+                feeTokenAccount,
+                fromPubkey,
+                feeAmount,
+                [],
+                TOKEN_PROGRAM_ID
+            )
+        );
+
+        const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash('confirmed');
         transaction.recentBlockhash = blockhash;
         transaction.feePayer = fromPubkey;
 
         const signed = await this.provider.signTransaction(transaction);
-        const signature = await connection.sendRawTransaction(signed.serialize());
-        await connection.confirmTransaction(signature);
+        const signature = await this.connection.sendRawTransaction(signed.serialize(), {
+            skipPreflight: false,
+            preflightCommitment: 'confirmed'
+        });
+
+        await this.connection.confirmTransaction({
+            signature,
+            blockhash,
+            lastValidBlockHeight
+        }, 'confirmed');
 
         await this.recordPayment(signature, tier, amount, 'USDC');
 
@@ -213,7 +411,9 @@ const PSM_PAY = {
             signature,
             tier,
             amount,
-            currency: 'USDC'
+            currency: 'USDC',
+            fee: feeAmount / 1_000_000,
+            explorer: `https://solscan.io/tx/${signature}`
         };
     },
 
@@ -222,40 +422,40 @@ const PSM_PAY = {
         try {
             const wallet = this.provider.publicKey.toString();
 
-            // 1. Record payment in backend
-            const response = await fetch('https://sound-prospective-handheld-turtle.trycloudflare.com/api/v1/payments/record', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...PSM_AUTH.getAuthHeaders()
-                },
-                body: JSON.stringify({
-                    signature,
-                    tier,
-                    amount,
-                    currency,
-                    wallet
-                })
-            });
+            // Record payment in backend (if configured)
+            if (this.CONFIG.API_URL && !this.CONFIG.API_URL.includes('example.com')) {
+                const headers = { 'Content-Type': 'application/json' };
 
-            if (!response.ok) {
-                console.error('Failed to record payment');
+                // Add auth headers if available
+                if (typeof PSM_AUTH !== 'undefined' && PSM_AUTH.getAuthHeaders) {
+                    Object.assign(headers, PSM_AUTH.getAuthHeaders());
+                }
+
+                const response = await fetch(`${this.CONFIG.API_URL}/api/v1/payments/record`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ signature, tier, amount, currency, wallet })
+                });
+
+                if (!response.ok) {
+                    console.warn('Failed to record payment to backend');
+                }
             }
 
-            // 2. Trigger NFT minting
-            console.log('Payment recorded, minting membership NFT...');
-            const nftResult = await PSM_NFT.mintMembershipNFT(tier, signature);
+            // Trigger NFT minting if available
+            if (typeof PSM_NFT !== 'undefined') {
+                console.log('Payment recorded, minting membership NFT...');
+                const nftResult = await PSM_NFT.mintMembershipNFT(tier, signature);
 
-            if (nftResult.success) {
-                console.log('NFT minted:', nftResult.nftMint);
-                // Store NFT info
-                localStorage.setItem('psmNFT', JSON.stringify({
-                    mint: nftResult.nftMint,
-                    tier: nftResult.tier,
-                    mintedAt: new Date().toISOString()
-                }));
+                if (nftResult.success) {
+                    console.log('NFT minted:', nftResult.nftMint);
+                    localStorage.setItem('psmNFT', JSON.stringify({
+                        mint: nftResult.nftMint,
+                        tier: nftResult.tier,
+                        mintedAt: new Date().toISOString()
+                    }));
+                }
             }
-
         } catch (error) {
             console.error('Payment recording error:', error);
         }
@@ -270,39 +470,44 @@ const PSM_PAY = {
 
     // Verify payment on-chain
     async verifyPayment(signature) {
-        const { Connection } = window.solanaWeb3;
-        const connection = new Connection('https://api.mainnet-beta.solana.com');
-
         try {
-            const result = await connection.getTransaction(signature, {
-                commitment: 'confirmed'
+            const result = await this.connection.getTransaction(signature, {
+                commitment: 'confirmed',
+                maxSupportedTransactionVersion: 0
             });
 
+            if (!result) {
+                return { success: false, error: 'Transaction not found' };
+            }
+
             return {
-                success: result !== null,
-                confirmed: result?.meta?.err === null,
-                slot: result?.slot,
-                blockTime: result?.blockTime
+                success: true,
+                confirmed: result.meta?.err === null,
+                slot: result.slot,
+                blockTime: result.blockTime,
+                fee: result.meta?.fee
             };
         } catch (error) {
             return { success: false, error: error.message };
         }
     },
 
-    // Get current SOL price in USD (for display)
+    // Get current SOL price in USD
     async getSOLPrice() {
         try {
             const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
             const data = await response.json();
             return data.solana.usd;
-        } catch (error) {
-            return null; // Fallback: don't show USD conversion
+        } catch {
+            return null;
         }
     },
 
     // Format price for display
     async formatPrices(tier) {
         const tierData = this.TIERS[tier];
+        if (!tierData) return null;
+
         const solPrice = await this.getSOLPrice();
 
         return {
@@ -315,22 +520,40 @@ const PSM_PAY = {
 
 // NFT Membership System
 const PSM_NFT = {
-    // NFT Minter service URL (runs alongside main API)
-    MINTER_URL: 'http://163.192.105.31:3001',
-    API_URL: 'https://sound-prospective-handheld-turtle.trycloudflare.com',
+    get MINTER_URL() { return PSM_PAY.CONFIG.MINTER_URL; },
+    get API_URL() { return PSM_PAY.CONFIG.API_URL; },
 
-    // Check if wallet holds membership NFT
     async checkMembership(walletAddress) {
+        if (!walletAddress) {
+            return { hasMembership: false, error: 'No wallet address provided' };
+        }
+
         try {
-            // Check both backend and on-chain
-            const [apiCheck, chainCheck] = await Promise.all([
-                fetch(`${this.API_URL}/api/v1/nft/check?wallet=${walletAddress}`).then(r => r.json()),
-                fetch(`${this.MINTER_URL}/check-membership?wallet=${walletAddress}`).then(r => r.json()).catch(() => null)
-            ]);
+            const checks = [];
+
+            if (this.API_URL && !this.API_URL.includes('example.com')) {
+                checks.push(
+                    fetch(`${this.API_URL}/api/v1/nft/check?wallet=${walletAddress}`)
+                        .then(r => r.json())
+                        .catch(() => null)
+                );
+            }
+
+            if (this.MINTER_URL && !this.MINTER_URL.includes('example.com')) {
+                checks.push(
+                    fetch(`${this.MINTER_URL}/check-membership?wallet=${walletAddress}`)
+                        .then(r => r.json())
+                        .catch(() => null)
+                );
+            }
+
+            const results = await Promise.all(checks);
+            const apiCheck = results[0];
+            const chainCheck = results[1];
 
             return {
-                hasMembership: apiCheck.hasMembership || chainCheck?.hasMembership,
-                tier: apiCheck.tier || chainCheck?.tier,
+                hasMembership: apiCheck?.hasMembership || chainCheck?.hasMembership || false,
+                tier: apiCheck?.tier || chainCheck?.tier,
                 nftMint: chainCheck?.nftMint
             };
         } catch (error) {
@@ -338,23 +561,26 @@ const PSM_NFT = {
         }
     },
 
-    // Verify payment and mint NFT
     async mintMembershipNFT(tier, paymentSignature) {
-        const wallet = window.solana?.publicKey?.toString();
+        const wallet = window.solana?.publicKey?.toString() ||
+                      window.solflare?.publicKey?.toString() ||
+                      window.backpack?.publicKey?.toString();
+
         if (!wallet) {
             return { success: false, error: 'Wallet not connected' };
         }
 
+        if (!this.MINTER_URL || this.MINTER_URL.includes('example.com')) {
+            console.warn('NFT minting not configured');
+            return { success: false, error: 'NFT minting not configured' };
+        }
+
         try {
-            // 1. Verify payment on-chain
-            console.log('Verifying payment on-chain...');
+            // Verify payment
             const verifyRes = await fetch(`${this.MINTER_URL}/verify-payment`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    signature: paymentSignature,
-                    tier
-                })
+                body: JSON.stringify({ signature: paymentSignature, tier })
             });
             const verifyData = await verifyRes.json();
 
@@ -362,9 +588,7 @@ const PSM_NFT = {
                 return { success: false, error: verifyData.error || 'Payment verification failed' };
             }
 
-            console.log('Payment verified, minting NFT...');
-
-            // 2. Mint the NFT
+            // Mint NFT
             const mintRes = await fetch(`${this.MINTER_URL}/mint`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -380,35 +604,33 @@ const PSM_NFT = {
                 return { success: false, error: mintData.error || 'Minting failed' };
             }
 
-            // 3. Update backend user record
-            await fetch(`${this.API_URL}/api/v1/nft/mint`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...PSM_AUTH.getAuthHeaders()
-                },
-                body: JSON.stringify({
-                    tier,
-                    wallet,
-                    nftMint: mintData.nftMint
-                })
-            });
+            // Update backend if configured
+            if (this.API_URL && !this.API_URL.includes('example.com')) {
+                const headers = { 'Content-Type': 'application/json' };
+                if (typeof PSM_AUTH !== 'undefined' && PSM_AUTH.getAuthHeaders) {
+                    Object.assign(headers, PSM_AUTH.getAuthHeaders());
+                }
+
+                await fetch(`${this.API_URL}/api/v1/nft/mint`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ tier, wallet, nftMint: mintData.nftMint })
+                }).catch(() => {});
+            }
 
             return {
                 success: true,
                 nftMint: mintData.nftMint,
                 tier: mintData.tier,
-                explorer: mintData.explorer,
+                explorer: mintData.explorer || `https://solscan.io/token/${mintData.nftMint}`,
                 metadata: mintData.metadata
             };
-
         } catch (error) {
             console.error('NFT minting error:', error);
             return { success: false, error: error.message };
         }
     },
 
-    // Get NFT image for display
     getNFTImage(tier) {
         const images = {
             basic: 'https://purplesquirrel.media/nft/basic.png',
@@ -420,8 +642,16 @@ const PSM_NFT = {
 };
 
 // Auto-initialize
-document.addEventListener('DOMContentLoaded', () => PSM_PAY.init());
+if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => PSM_PAY.init());
+}
 
 // Export
-window.PSM_PAY = PSM_PAY;
-window.PSM_NFT = PSM_NFT;
+if (typeof window !== 'undefined') {
+    window.PSM_PAY = PSM_PAY;
+    window.PSM_NFT = PSM_NFT;
+}
+
+if (typeof module !== 'undefined') {
+    module.exports = { PSM_PAY, PSM_NFT };
+}
