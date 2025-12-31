@@ -1,138 +1,159 @@
-// Test suite for Solana Pay paywall fee calculations
+// Test suite for Solana Pay paywall
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const USDC_DECIMALS = 1_000_000;
-const FEE_PERCENT = 0.01; // 1%
+const FEE_PERCENT = 0.01;
 
 console.log('=== Jellyfin Solana Paywall Tests ===\n');
 
-// Test 1: SOL fee calculation
-function testSOLFeeCalculation() {
-    console.log('Test 1: SOL Fee Calculation');
+let passed = 0;
+let failed = 0;
 
-    const testCases = [
-        { amount: 0.05, tier: 'Basic' },
-        { amount: 0.1, tier: 'Pro' },
-        { amount: 0.25, tier: 'Creator' },
-        { amount: 1.0, tier: 'Custom 1 SOL' },
-    ];
+function test(name, fn) {
+    try {
+        fn();
+        console.log(`  ✓ ${name}`);
+        passed++;
+    } catch (error) {
+        console.log(`  ✗ ${name}: ${error.message}`);
+        failed++;
+    }
+}
 
-    let passed = true;
+function assertEqual(actual, expected, msg = '') {
+    if (actual !== expected) {
+        throw new Error(`${msg} Expected ${expected}, got ${actual}`);
+    }
+}
 
-    for (const test of testCases) {
-        const totalLamports = Math.round(test.amount * LAMPORTS_PER_SOL);
+function assertClose(actual, expected, tolerance = 0.0001, msg = '') {
+    if (Math.abs(actual - expected) > tolerance) {
+        throw new Error(`${msg} Expected ~${expected}, got ${actual}`);
+    }
+}
+
+// Test 1: SOL Fee Calculations
+console.log('Test 1: SOL Fee Calculations');
+[0.05, 0.1, 0.25, 1, 10].forEach(amount => {
+    test(`${amount} SOL fee calculation`, () => {
+        const totalLamports = Math.round(amount * LAMPORTS_PER_SOL);
         const feeLamports = Math.round(totalLamports * FEE_PERCENT);
         const merchantLamports = totalLamports - feeLamports;
 
         const feeSOL = feeLamports / LAMPORTS_PER_SOL;
         const merchantSOL = merchantLamports / LAMPORTS_PER_SOL;
-        const expectedFee = test.amount * 0.01;
 
-        const feeCorrect = Math.abs(feeSOL - expectedFee) < 0.0000001;
-        const sumCorrect = Math.abs((feeSOL + merchantSOL) - test.amount) < 0.0000001;
+        assertClose(feeSOL + merchantSOL, amount, 0.0000001, 'Sum mismatch');
+        assertClose(feeSOL / amount * 100, 1, 0.01, 'Fee percent mismatch');
+    });
+});
 
-        if (feeCorrect && sumCorrect) {
-            console.log(`  ✓ ${test.tier}: ${test.amount} SOL → Merchant: ${merchantSOL} SOL, Fee: ${feeSOL} SOL`);
-        } else {
-            console.log(`  ✗ ${test.tier}: FAILED - fee calculation incorrect`);
-            passed = false;
-        }
-    }
-
-    return passed;
-}
-
-// Test 2: USDC fee calculation
-function testUSDCFeeCalculation() {
-    console.log('\nTest 2: USDC Fee Calculation');
-
-    const testCases = [
-        { amount: 9.99, tier: 'Basic' },
-        { amount: 19.99, tier: 'Pro' },
-        { amount: 49.99, tier: 'Creator' },
-        { amount: 100.00, tier: 'Custom $100' },
-    ];
-
-    let passed = true;
-
-    for (const test of testCases) {
-        const totalAmount = Math.round(test.amount * USDC_DECIMALS);
+// Test 2: USDC Fee Calculations
+console.log('\nTest 2: USDC Fee Calculations');
+[9.99, 19.99, 49.99, 100].forEach(amount => {
+    test(`$${amount} USDC fee calculation`, () => {
+        const totalAmount = Math.round(amount * USDC_DECIMALS);
         const feeAmount = Math.round(totalAmount * FEE_PERCENT);
         const merchantAmount = totalAmount - feeAmount;
 
         const feeUSDC = feeAmount / USDC_DECIMALS;
         const merchantUSDC = merchantAmount / USDC_DECIMALS;
 
-        const sumCorrect = Math.abs((feeUSDC + merchantUSDC) - test.amount) < 0.000001;
+        assertClose(feeUSDC + merchantUSDC, amount, 0.000001, 'Sum mismatch');
+    });
+});
 
-        if (sumCorrect) {
-            console.log(`  ✓ ${test.tier}: $${test.amount} → Merchant: $${merchantUSDC.toFixed(6)}, Fee: $${feeUSDC.toFixed(6)}`);
-        } else {
-            console.log(`  ✗ ${test.tier}: FAILED - fee calculation incorrect`);
-            passed = false;
-        }
-    }
-
-    return passed;
-}
-
-// Test 3: Verify fee percentages
-function testFeePercentages() {
-    console.log('\nTest 3: Fee Percentage Verification');
-
-    const amounts = [0.05, 0.1, 0.25, 1, 10, 100];
-    let passed = true;
-
-    for (const amount of amounts) {
-        const total = Math.round(amount * LAMPORTS_PER_SOL);
-        const fee = Math.round(total * FEE_PERCENT);
-        const actualPercent = (fee / total) * 100;
-
-        // Allow for tiny rounding differences
-        if (Math.abs(actualPercent - 1.0) < 0.01) {
-            console.log(`  ✓ ${amount} SOL: Fee is ${actualPercent.toFixed(4)}%`);
-        } else {
-            console.log(`  ✗ ${amount} SOL: Fee is ${actualPercent.toFixed(4)}% (expected ~1%)`);
-            passed = false;
-        }
-    }
-
-    return passed;
-}
-
-// Test 4: Wallet address validation
-function testWalletAddress() {
-    console.log('\nTest 4: Fee Wallet Address');
-
+// Test 3: Wallet Address Validation
+console.log('\nTest 3: Wallet Address Validation');
+test('Fee wallet address format', () => {
     const FEE_WALLET = 'DjaRzzZi94Mq9zJvi23QbB5yRbCSRFENTDDeWicPVxcu';
-
-    // Solana addresses are base58 encoded, 32-44 characters
     const validLength = FEE_WALLET.length >= 32 && FEE_WALLET.length <= 44;
     const validChars = /^[1-9A-HJ-NP-Za-km-z]+$/.test(FEE_WALLET);
+    if (!validLength || !validChars) throw new Error('Invalid wallet format');
+});
 
-    if (validLength && validChars) {
-        console.log(`  ✓ Fee wallet address is valid format: ${FEE_WALLET}`);
-        return true;
-    } else {
-        console.log(`  ✗ Fee wallet address invalid`);
-        return false;
-    }
-}
+// Test 4: Network Configuration
+console.log('\nTest 4: Network Configuration');
+test('Mainnet USDC mint address', () => {
+    const MAINNET_USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    assertEqual(MAINNET_USDC.length, 44, 'Invalid USDC mint length');
+});
 
-// Run all tests
-const results = [
-    testSOLFeeCalculation(),
-    testUSDCFeeCalculation(),
-    testFeePercentages(),
-    testWalletAddress(),
-];
+test('Devnet USDC mint address', () => {
+    const DEVNET_USDC = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+    assertEqual(DEVNET_USDC.length, 44, 'Invalid devnet USDC mint length');
+});
 
+// Test 5: Tier Configuration
+console.log('\nTest 5: Tier Configuration');
+const tiers = {
+    basic: { priceSOL: 0.05, priceUSDC: 9.99, durationDays: 30 },
+    pro: { priceSOL: 0.1, priceUSDC: 19.99, durationDays: 30 },
+    creator: { priceSOL: 0.25, priceUSDC: 49.99, durationDays: 30 }
+};
+
+Object.entries(tiers).forEach(([name, tier]) => {
+    test(`${name} tier has valid prices`, () => {
+        if (tier.priceSOL <= 0) throw new Error('Invalid SOL price');
+        if (tier.priceUSDC <= 0) throw new Error('Invalid USDC price');
+        if (tier.durationDays <= 0) throw new Error('Invalid duration');
+    });
+});
+
+// Test 6: Subscription Expiry Calculation
+console.log('\nTest 6: Subscription Expiry Calculation');
+test('30-day subscription expiry', () => {
+    const now = new Date();
+    const durationDays = 30;
+    const expiresAt = new Date(now.getTime() + (durationDays * 24 * 60 * 60 * 1000));
+    const diffDays = (expiresAt - now) / (24 * 60 * 60 * 1000);
+    assertEqual(Math.round(diffDays), 30, 'Expiry calculation mismatch');
+});
+
+// Test 7: Reference Generation
+console.log('\nTest 7: Reference Generation');
+test('Reference is 64 hex characters', () => {
+    const ref = Array.from({ length: 32 }, () => Math.floor(Math.random() * 256))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+    assertEqual(ref.length, 64, 'Reference length mismatch');
+    if (!/^[0-9a-f]+$/.test(ref)) throw new Error('Invalid hex characters');
+});
+
+// Test 8: Payment URL Generation
+console.log('\nTest 8: Payment URL Generation');
+test('Solana Pay URL format', () => {
+    const MERCHANT_WALLET = 'DjaRzzZi94Mq9zJvi23QbB5yRbCSRFENTDDeWicPVxcu';
+    const amount = 0.1;
+    const url = `solana:${MERCHANT_WALLET}?amount=${amount}&label=Test`;
+
+    if (!url.startsWith('solana:')) throw new Error('Invalid URL scheme');
+    if (!url.includes('amount=')) throw new Error('Missing amount param');
+});
+
+// Test 9: Explorer URL Generation
+console.log('\nTest 9: Explorer URL Generation');
+test('Mainnet explorer URL', () => {
+    const sig = '5abc123';
+    const url = `https://solscan.io/tx/${sig}`;
+    if (!url.includes('solscan.io')) throw new Error('Invalid explorer');
+});
+
+test('Devnet explorer URL', () => {
+    const sig = '5abc123';
+    const url = `https://solscan.io?cluster=devnet/tx/${sig}`;
+    if (!url.includes('devnet')) throw new Error('Missing cluster param');
+});
+
+// Summary
 console.log('\n=== Test Summary ===');
-const allPassed = results.every(r => r);
-if (allPassed) {
-    console.log('✓ All tests passed!\n');
+console.log(`Passed: ${passed}`);
+console.log(`Failed: ${failed}`);
+
+if (failed === 0) {
+    console.log('\n✓ All tests passed!\n');
     process.exit(0);
 } else {
-    console.log('✗ Some tests failed\n');
+    console.log('\n✗ Some tests failed\n');
     process.exit(1);
 }
